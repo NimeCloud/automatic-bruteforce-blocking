@@ -6,7 +6,8 @@
 $settings = @{
     # Rule names
     WhitelistRuleName = "_WhitelistIPs"
-	BlacklistRuleName = "_BlacklistIPs"
+    BlacklistRuleName = "_BlacklistIPs"
+    BannedRuleName = "_Banned"  # Yeni kural adı eklendi
 
     # Log file names
     BlockedIPLogFile = ".\_log-blacklist-added.txt"
@@ -147,8 +148,27 @@ if ($whitelistRule -eq $null) {
     $whitelistRule = $fw.Rules | Where-Object { $_.Name -eq $settings.WhitelistRuleName }
 }
 
+# Check and create Banned rule if it doesn't exist
+$bannedRule = $fw.Rules | Where-Object { $_.Name -eq $settings.BannedRuleName }
+if ($bannedRule -eq $null) {
+    Write-Host "Firewall rule '$($settings.BannedRuleName)' does not exist. Creating it..."
+    $rule = New-Object -ComObject HNetCfg.FWRule
+    $rule.Name = $settings.BannedRuleName
+    $rule.Description = "Block IP addresses manually banned by admin"
+    $rule.Protocol = 6  # TCP
+    $rule.Action = 0     # Block
+    $rule.Direction = 1  # Inbound
+    $rule.Enabled = $true
+    $rule.RemoteAddresses = $settings.DummyIP  # Start with a dummy IP
+    $fw.Rules.Add($rule)
+    $bannedRule = $fw.Rules | Where-Object { $_.Name -eq $settings.BannedRuleName }
+}
+
 # Get current whitelist IPs
 $whitelistIPs = $whitelistRule.RemoteAddresses -split ',' | Where-Object { $_ -ne $settings.DummyIP }
+
+# Get current banned IPs
+$bannedIPs = $bannedRule.RemoteAddresses -split ',' | Where-Object { $_ -ne $settings.DummyIP }
 
 # Get successful logins (Event ID 4624)
 $successfulLogins = Get-WinEvent -FilterHashtable @{
@@ -169,16 +189,20 @@ $successfulLogins = Get-WinEvent -FilterHashtable @{
 foreach ($ip in $successfulLogins) {
     $ipAddress = $ip.IpAddress
     if (Test-ValidIPAddress -ipAddress $ipAddress) {  # IP adresinin geçerli olup olmadığını kontrol et
-        if (-not ($whitelistIPs -contains "$ipAddress/255.255.255.255")) {
-            if ($whitelistRule.RemoteAddresses -eq $settings.DummyIP) {
-                # Replace dummy IP with the new IP
-                $whitelistRule.RemoteAddresses = "$ipAddress/255.255.255.255"
-            } else {
-                # Add the new IP to the existing list
-                $whitelistRule.RemoteAddresses += ",$ipAddress/255.255.255.255"
+        if (-not ($bannedIPs -contains "$ipAddress/255.255.255.255")) {  # IP adresinin _Banned kuralında olup olmadığını kontrol et
+            if (-not ($whitelistIPs -contains "$ipAddress/255.255.255.255")) {
+                if ($whitelistRule.RemoteAddresses -eq $settings.DummyIP) {
+                    # Replace dummy IP with the new IP
+                    $whitelistRule.RemoteAddresses = "$ipAddress/255.255.255.255"
+                } else {
+                    # Add the new IP to the existing list
+                    $whitelistRule.RemoteAddresses += ",$ipAddress/255.255.255.255"
+                }
+                Write-Host "Added IP $ipAddress to whitelist."
+                "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')    Added IP $ipAddress to whitelist." >> $settings.WhitelistAdditionLogFile
             }
-            Write-Host "Added IP $ipAddress to whitelist."
-            "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')    Added IP $ipAddress to whitelist." >> $settings.WhitelistAdditionLogFile
+        } else {
+            Write-Host "IP $ipAddress is banned. Skipping whitelist addition."
         }
     } else {
         Write-Host "Invalid IP address '$ipAddress' skipped."
