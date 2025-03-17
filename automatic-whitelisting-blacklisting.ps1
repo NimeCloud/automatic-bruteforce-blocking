@@ -7,12 +7,12 @@ $settings = @{
     # Rule names
     WhitelistRuleName = "_WhitelistIPs"
     BlacklistRuleName = "_BlacklistIPs"
-    BannedRuleName = "_Banned"  # Yeni kural adı eklendi
+    BannedRuleName = "_Banned"
 
     # Log file names
     BlockedIPLogFile = ".\_log-blacklist-added.txt"
     WhitelistRemovalLogFile = ".\_log-whitelist-removed.txt"
-    WhitelistAdditionLogFile = ".\_log-whitelist-added.txt"  # Yeni log dosyası eklendi
+    WhitelistAdditionLogFile = ".\_log-whitelist-added.txt"
 
     # Time range for log scanning (in hours)
     LogScanRangeHours = 24
@@ -75,7 +75,7 @@ function Test-ValidIPAddress {
     param (
         [string]$ipAddress
     )
-    # IPv4 ve IPv6 adreslerini kontrol et
+    # Check IPv4 and IPv6 addresses
     if ([System.Net.IPAddress]::TryParse($ipAddress, [ref]$null)) {
         return $true
     }
@@ -178,12 +178,18 @@ $successfulLogins = Get-WinEvent -FilterHashtable @{
 } | ForEach-Object {
     $eventXml = [xml]$_.ToXml()
     $ipAddress = $eventXml.Event.EventData.Data | Where-Object { $_.Name -eq "IpAddress" } | Select-Object -ExpandProperty "#text"
-    if ($ipAddress) {
-        [PSCustomObject]@{
-            IpAddress = $ipAddress
+    $logonType = $eventXml.Event.EventData.Data | Where-Object { $_.Name -eq "LogonType" } | Select-Object -ExpandProperty "#text"
+    $subjectUserName = $eventXml.Event.EventData.Data | Where-Object { $_.Name -eq "SubjectUserName" } | Select-Object -ExpandProperty "#text"
+
+    # Filter ANONYMOUS LOGON or SYSTEM logins
+    if ($subjectUserName -notin @("ANONYMOUS LOGON", "SYSTEM") -and $logonType -ne "0") {
+        if ($ipAddress) {
+            [PSCustomObject]@{
+                IpAddress = $ipAddress
+            }
         }
     }
-} | Where-Object { $_.IpAddress -ne $null -and $_.IpAddress -ne "" }  # Boş IP adreslerini filtrele
+} | Where-Object { $_.IpAddress -ne $null -and $_.IpAddress -ne "" }  # Flter empty IP addresses
 
 # Add successful login IPs to whitelist
 foreach ($ip in $successfulLogins) {
