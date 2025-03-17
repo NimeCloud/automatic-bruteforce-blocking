@@ -170,6 +170,8 @@ $whitelistIPs = $whitelistRule.RemoteAddresses -split ',' | Where-Object { $_ -n
 # Get current banned IPs
 $bannedIPs = $bannedRule.RemoteAddresses -split ',' | Where-Object { $_ -ne $settings.DummyIP }
 
+
+
 # Get successful logins (Event ID 4624)
 $successfulLogins = Get-WinEvent -FilterHashtable @{
     LogName = 'Security'
@@ -178,11 +180,10 @@ $successfulLogins = Get-WinEvent -FilterHashtable @{
 } | ForEach-Object {
     $eventXml = [xml]$_.ToXml()
     $ipAddress = $eventXml.Event.EventData.Data | Where-Object { $_.Name -eq "IpAddress" } | Select-Object -ExpandProperty "#text"
-    $logonType = $eventXml.Event.EventData.Data | Where-Object { $_.Name -eq "LogonType" } | Select-Object -ExpandProperty "#text"
-    $subjectUserName = $eventXml.Event.EventData.Data | Where-Object { $_.Name -eq "SubjectUserName" } | Select-Object -ExpandProperty "#text"
+    $targetUserName = $eventXml.Event.EventData.Data | Where-Object { $_.Name -eq "TargetUserName" } | Select-Object -ExpandProperty "#text"
 
     # Filter ANONYMOUS LOGON or SYSTEM logins
-    if ($subjectUserName -notin @("ANONYMOUS LOGON", "SYSTEM") -and $logonType -ne "0") {
+    if ($targetUserName -notin @("ANONYMOUS LOGON", "SYSTEM")) {
         if ($ipAddress) {
             [PSCustomObject]@{
                 IpAddress = $ipAddress
@@ -191,12 +192,13 @@ $successfulLogins = Get-WinEvent -FilterHashtable @{
     }
 } | Where-Object { $_.IpAddress -ne $null -and $_.IpAddress -ne "" }  # Flter empty IP addresses
 
+
 # Add successful login IPs to whitelist
 foreach ($ip in $successfulLogins) {
     $ipAddress = $ip.IpAddress
     if (Test-ValidIPAddress -ipAddress $ipAddress) {  # IP adresinin geçerli olup olmadığını kontrol et
         if (-not ($bannedIPs -contains "$ipAddress/255.255.255.255")) {  # IP adresinin _Banned kuralında olup olmadığını kontrol et
-            if (-not ($whitelistIPs -contains "$ipAddress/255.255.255.255")) {
+            if (-not ($whitelistIPs -contains "$ipAddress/255.255.255.255")) {  # IP adresinin zaten whitelist'te olup olmadığını kontrol et
                 if ($whitelistRule.RemoteAddresses -eq $settings.DummyIP) {
                     # Replace dummy IP with the new IP
                     $whitelistRule.RemoteAddresses = "$ipAddress/255.255.255.255"
@@ -206,6 +208,10 @@ foreach ($ip in $successfulLogins) {
                 }
                 Write-Host "Added IP $ipAddress to whitelist."
                 "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')    Added IP $ipAddress to whitelist." >> $settings.WhitelistAdditionLogFile
+                # Whitelist IPs listesini güncelle
+                $whitelistIPs += "$ipAddress/255.255.255.255"
+            } else {
+                Write-Host "IP $ipAddress is already in the whitelist. Skipping."
             }
         } else {
             Write-Host "IP $ipAddress is banned. Skipping whitelist addition."
