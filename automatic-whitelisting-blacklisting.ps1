@@ -2,12 +2,19 @@
 # Automatic adding whitelist & blacklist IPs & rules to firewall  2025-03-16 Emin Akbulut
 #
 
+$ErrorActionPreference = "SilentlyContinue"
+
 # Settings
 $settings = @{
+
     # Rule names
     WhitelistRuleName = "_WhitelistIPs"
     BlacklistRuleName = "_BlacklistIPs"
     BannedRuleName = "_Banned"
+    
+    # Rule priorities
+	WhitelistRulePriority = 100
+	BlacklistRulePriority = 200
 
     # Log file names
     BlockedIPLogFile = ".\_log-blacklist-added.txt"
@@ -31,12 +38,16 @@ $settings = @{
     ClearOldSuccessLogs = $true  # Clear old successful login logs
     
     # Dummy IP address for initial rule creation
-    DummyIP = "0.0.0.0/255.255.255.255"
+    #DummyIP = "0.0.0.0/255.255.255.255"
+    # Daha güvenli bir dummy IP kullanımı
+	DummyIP = "127.0.0.2/255.255.255.255"  # Localhost dışında bir IP
+
 }
 
 # Get current time
 $currentTime = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
 
+# Function to clear old logs
 # Function to clear old logs
 function Clear-OldLogs {
     param (
@@ -45,21 +56,42 @@ function Clear-OldLogs {
         [int[]]$eventIDs
     )
     if ($hoursOld -gt 0) {
-        $oldestDate = (Get-Date).AddHours(-$hoursOld).ToString("yyyy-MM-dd HH:mm:ss")
+        $oldestDate = (Get-Date).AddHours(-$hoursOld)
         Write-Host "Clearing logs older than $hoursOld hours from $logName..."
-        Get-WinEvent -LogName $logName | Where-Object {
-            $_.TimeCreated -lt $oldestDate -and $eventIDs -contains $_.Id
-        } | ForEach-Object {
-            Remove-EventLog -RecordId $_.RecordId -LogName $logName
+        
+        # Eski kayıtları filtreleme (silme değil, sadece listeleme)
+        $oldEvents = Get-WinEvent -LogName $logName -FilterXPath "*[System[(@TimeCreated <= '$($oldestDate.ToUniversalTime().ToString("o"))') and (EventID=$($eventIDs -join ' or EventID='))]]" -ErrorAction SilentlyContinue
+        
+        if ($oldEvents -and $oldEvents.Count -gt 0) {
+            Write-Host "Found $($oldEvents.Count) old events in $logName log."
+            
+            # Eski logları arşivleme seçeneği
+            $archiveFile = ".\Archive_$($logName -replace '/', '_')_$(Get-Date -Format 'yyyyMMdd_HHmmss').evtx"
+            try {
+                # Filtrelenmiş logları dışa aktarma
+                wevtutil epl $logName $archiveFile "/q:*[System[(@TimeCreated <= '$($oldestDate.ToUniversalTime().ToString("o"))') and (EventID=$($eventIDs -join ' or EventID='))]]"
+                Write-Host "Archived old logs to $archiveFile"
+                
+                # NOT: Windows Event Log'dan belirli kayıtları silmek için yönetici hakları gereklidir
+                # ve PowerShell cmdlet'leri ile doğrudan desteklenmez.
+                # Tam temizlik için log boyutu sınırlaması ve otomatik arşivleme önerilir.
+            }
+            catch {
+                Write-Host "Error archiving logs: $_"
+            }
+        }
+        else {
+            Write-Host "No old events found in $logName log."
         }
     }
 }
+
 
 # Clear old logs if enabled
 if ($settings.ClearOldLogs -gt 0) {
     if ($settings.ClearOldFailedLogs) {
         Clear-OldLogs -logName "Security" -hoursOld $settings.ClearOldLogs -eventIDs @(4625)  # Failed logins
-        Clear-OldLogs -logName "Application" -hoursOld $settings.ClearOldLogs -eventIDs @(17836)  # Failed SQL logins
+        Clear-OldLogs -logName "Application" -hoursOld $settings.ClearOldLogs -eventIDs @(17836, 18456, 18452)  # Failed SQL logins
     }
     if ($settings.ClearOldSuccessLogs) {
         Clear-OldLogs -logName "Security" -hoursOld $settings.ClearOldLogs -eventIDs @(4624)  # Successful logins
@@ -103,26 +135,45 @@ function Get-FailedWindowsLogins {
     } | Where-Object { $_.IpAddress -ne $null }
 }
 
-# Function to get failed SQL login attempts (Event ID 17836)
+# Function to get failed SQL login attempts (Event ID 17836, 18456, 18452)
 function Get-FailedSQLLogins {
     param (
         [DateTime]$startTime
     )
-    Get-WinEvent -FilterHashtable @{
-        LogName = 'Application'
-        ID = 17836
-        StartTime = $startTime
-    } | ForEach-Object {
-        $eventXml = [xml]$_.ToXml()
-        $ipAddress = $eventXml.Event.EventData.Data | Where-Object { $_.Name -eq "IpAddress" } | Select-Object -ExpandProperty "#text"
-        if ($ipAddress) {
-            [PSCustomObject]@{
-                IpAddress = $ipAddress
-                TimeCreated = $_.TimeCreated.ToString("yyyy-MM-dd HH:mm:ss")
+    try {
+        Get-WinEvent -FilterHashtable @{
+            LogName = 'Application'
+            ID = 17836, 18456, 18452
+            StartTime = $startTime
+        } -ErrorAction SilentlyContinue | ForEach-Object {
+            $ipAddress = $null
+            # Try XML parsing first
+            try {
+                $eventXml = [xml]$_.ToXml()
+                $ipAddress = $eventXml.Event.EventData.Data | 
+                    Where-Object { $_.Name -eq "IpAddress" } | 
+                    Select-Object -ExpandProperty "#text"
+            } catch {}
+            
+            # If XML parsing failed or didn't find IP, try message parsing
+            if (-not $ipAddress -and $_.Message -match "\[CLIENT: ([\d\.]+)\]") {
+                $ipAddress = $matches[1]
             }
-        }
-    } | Where-Object { $_.IpAddress -ne $null }
+            
+            if ($ipAddress) {
+                [PSCustomObject]@{
+                    IpAddress = $ipAddress
+                    TimeCreated = $_.TimeCreated.ToString("yyyy-MM-dd HH:mm:ss")
+                }
+            }
+        } | Where-Object { $_.IpAddress -ne $null }
+    }
+    catch {
+        Write-Host "Error getting SQL login events: $_" -ForegroundColor Yellow
+        return @()
+    }
 }
+
 
 # Get failed login attempts
 $failedWindowsLogins = Get-FailedWindowsLogins -startTime $logScanRange
@@ -144,6 +195,12 @@ if ($whitelistRule -eq $null) {
     $rule.Direction = 1  # Inbound
     $rule.Enabled = $true
     $rule.RemoteAddresses = $settings.DummyIP  # Start with a dummy IP
+    
+    $rule.Profiles = 0x7FFFFFFF  # All profiles
+	$rule.Grouping = "Allowed IPs"
+	try { $rule.Priority = $settings.WhitelistRulePriority } catch {}
+
+
     $fw.Rules.Add($rule)
     $whitelistRule = $fw.Rules | Where-Object { $_.Name -eq $settings.WhitelistRuleName }
 }
@@ -160,6 +217,9 @@ if ($bannedRule -eq $null) {
     $rule.Direction = 1  # Inbound
     $rule.Enabled = $true
     $rule.RemoteAddresses = $settings.DummyIP  # Start with a dummy IP
+    
+    
+    
     $fw.Rules.Add($rule)
     $bannedRule = $fw.Rules | Where-Object { $_.Name -eq $settings.BannedRuleName }
 }
@@ -233,6 +293,12 @@ if ($blockRule -eq $null) {
     $rule.Direction = 1  # Inbound
     $rule.Enabled = $true
     $rule.RemoteAddresses = $settings.DummyIP  # Start with a dummy IP
+    
+    $rule.Profiles = 0x7FFFFFFF  # All profiles
+	$rule.Grouping = "Blocked IPs"
+	try { $rule.Priority = $settings.BlacklistRulePriority } catch {}
+
+    
     $fw.Rules.Add($rule)
     $blockRule = $fw.Rules | Where-Object { $_.Name -eq $settings.BlacklistRuleName }
 }
@@ -244,23 +310,35 @@ $blocklistIPs = $blockRule.RemoteAddresses -split ',' | Where-Object { $_ -ne $s
 $blockIPs = @()
 $removeFromWhitelist = @()
 
-foreach ($ip in ($allFailedLogins | Group-Object -Property IpAddress)) {
+# Filter to only recent attempts based on IP type
+$recentFailedLogins = $allFailedLogins | Where-Object {
+    $time = [DateTime]::Parse($_.TimeCreated)
+    if ($whitelistIPs -like "$($_.IpAddress)/*") {
+        $time -gt (Get-Date).AddMinutes(-$settings.WhitelistTimeRangeMinutes)
+    } else {
+        $time -gt (Get-Date).AddMinutes(-$settings.NonWhitelistTimeRangeMinutes)
+    }
+}
+
+foreach ($ip in ($recentFailedLogins | Group-Object -Property IpAddress)) {
     $ipAddress = $ip.Name
     $failedAttempts = $ip.Group.Count
 
-    # Check if IP is in whitelist
-    if ($whitelistIPs -contains $ipAddress) {
-        # If IP is in whitelist, check if it exceeds the whitelist threshold
+    # Check if IP is in whitelist (using corrected comparison)
+    $isWhitelisted = $whitelistIPs -like "$ipAddress/*"
+    
+    if ($isWhitelisted) {
+        Write-Host "IP $ipAddress is whitelisted (current attempts: $failedAttempts, threshold: $($settings.WhitelistFailedAttempts))"
         if ($failedAttempts -ge $settings.WhitelistFailedAttempts) {
             $removeFromWhitelist += $ipAddress
             $blockIPs += $ipAddress
-            Write-Host "Whitelisted IP $ipAddress exceeded the failed attempt threshold. Removing from whitelist and adding to blocklist."
+            Write-Host "Whitelisted IP $ipAddress exceeded threshold. Removing from whitelist and adding to blocklist."
         }
     } else {
-        # If IP is not in whitelist, check if it exceeds the non-whitelist threshold
+        Write-Host "IP $ipAddress is not whitelisted (current attempts: $failedAttempts, threshold: $($settings.NonWhitelistFailedAttempts))"
         if ($failedAttempts -ge $settings.NonWhitelistFailedAttempts) {
             $blockIPs += $ipAddress
-            Write-Host "Non-whitelisted IP $ipAddress exceeded the failed attempt threshold. Adding to blocklist."
+            Write-Host "Non-whitelisted IP $ipAddress exceeded threshold. Adding to blocklist."
         }
     }
 }
